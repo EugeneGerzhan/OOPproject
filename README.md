@@ -1,7 +1,7 @@
-# Character Battler
+# Battler Character
 
-Консольний застосунок на C#: структурований текст, персонажі, каталог із Genshin API та текстова битва.
+A C# console application featuring structured text, characters, a catalog sourced from the Genshin API, and a text-based battle system.
 
-* Дизайн-документ: [Docs/DesignDocument.md](Docs/DesignDocument.md)
-* Запуск: `dotnet run --project SOLID -- --chars --offline`
-* Тести: `dotnet test`
+* Design Document: [Docs/DesignDocument.md](Docs/DesignDocument.md)
+* Run: `dotnet run --project SOLID -- --chars --offline`
+* Test: `dotnet test`
