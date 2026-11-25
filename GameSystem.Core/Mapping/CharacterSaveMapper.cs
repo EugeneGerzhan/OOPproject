@@ -45,7 +45,7 @@ namespace GameSystem.Core.Mapping
 
                 save.Characters.Add(new CharacterData(
                     entry.Key, c.Name, classKey,
-                    c.Health, c.MaxHealth, c.Armor, c.AttackPower, uniqueAbilityId, profile));
+                    c.Health, c.MaxHealth, c.Armor, c.AttackPower, uniqueAbilityId, profile, c.Resist, c.Speed));
 
                 if (c.EquippedItem != null && state.Items.IdOf(c.EquippedItem) is int itemId)
                 {
@@ -141,6 +141,7 @@ namespace GameSystem.Core.Mapping
                 }
 
                 character.RestoreState(d.Health, d.MaxHealth, d.Armor, d.AttackPower, equipped, learned);
+                character.SetCombatStats(Math.Clamp(d.Resist, 0.0, 1.0), Math.Max(1, d.Speed));
             }
 
             return state;
@@ -155,7 +156,8 @@ namespace GameSystem.Core.Mapping
                 case FlurryOfBlowsAbility _:
                     return new AbilityData(id, FlurryType, ability.Name, 0, 0);
                 case CustomAbility custom:
-                    return new AbilityData(id, CustomType, custom.Name, custom.Hits, custom.AttackBonus, custom.Description);
+                    return new AbilityData(id, CustomType, custom.Name, custom.Hits, custom.AttackBonus,
+                        custom.Description, custom.Kind.ToString(), custom.ResistPenetration);
                 default:
                     throw new NotSupportedException($"Ability type '{ability.GetType().Name}' cannot be saved.");
             }
@@ -170,7 +172,9 @@ namespace GameSystem.Core.Mapping
                 case FlurryType:
                     return new FlurryOfBlowsAbility();
                 case CustomType:
-                    return new CustomAbility(d.Name, d.Hits, d.AttackBonus, d.Description ?? string.Empty);
+                    var kind = Enum.TryParse<DamageKind>(d.Kind, out var parsed) ? parsed : DamageKind.Physical;
+                    return new CustomAbility(d.Name, d.Hits, d.AttackBonus, d.Description ?? string.Empty,
+                        kind, d.ResistPenetration);
                 default:
                     throw new InvalidDataException($"Unknown ability type '{d.Type}'.");
             }

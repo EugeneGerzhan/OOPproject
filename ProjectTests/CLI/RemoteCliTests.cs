@@ -541,7 +541,8 @@ namespace ProjectTests.CliTests
             Assert.Contains("        Vision: Geo | Weapon type: Sword | Rarity: 5", sheet);
             Assert.Contains("        Skyward Blade", sheet);
             Assert.Contains("        Bonuses: +9 ATK, +2 ARM, +10 HP", sheet);
-            Assert.Contains("            Rite of Progeniture: Tectonic Tide - 3 attack(s) with +6 ATK while", sheet);
+            Assert.Contains("            Rite of Progeniture: Tectonic Tide - 3 magic attack(s) with +6 ATK", sheet);
+            Assert.Contains("            while used, ignores 10% of resist", sheet);
             Assert.Contains("            used", sheet);
         }
 

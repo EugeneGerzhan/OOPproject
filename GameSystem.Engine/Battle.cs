@@ -11,26 +11,63 @@ namespace GameSystem.Engine
     /// <summary>One line of the battle board.</summary>
     public record BoardRow(string Name, int Health, int MaxHealth, bool IsAlive, bool IsDefending, bool IsCurrent);
 
-    /// <summary>The data a renderer needs to show the state of a battle.</summary>
-    public record BattleBoard(int Round, string CurrentName, IReadOnlyList<BoardRow> Rows, bool IsOver, string? Winner);
+    /// <summary>The data a renderer needs to show the state of a battle (Order: who acts next, starting with the current one).</summary>
+    public record BattleBoard(int Round, string CurrentName, IReadOnlyList<BoardRow> Rows, bool IsOver, string? Winner,
+                              IReadOnlyList<string>? Order = null);
 
     /// <summary>The result of a finished battle.</summary>
     public record BattleOutcome(string? Winner, IReadOnlyList<string> Participants, int Rounds, int Actions);
 
+    /// <summary>One step of the history of a battle: who did what to whom and what was reported.</summary>
+    public record TurnRecord(int Number, int Round, string Actor, string Action, string? Target, IReadOnlyList<string> Messages);
+
+    /// <summary>Everything besides the characters that is needed to continue a battle later.</summary>
+    public record BattleProgress(int Round, IReadOnlyList<int> Queue, int QueueIndex, int Actions, IReadOnlyList<TurnRecord> History);
+
     /// <summary>
-    /// A turn-based battle of two or more characters. The characters act in the given order,
-    /// one action per turn. A round ends when everybody who is alive has acted; defense lasts until
-    /// the next round. The battle ends when at most one character is left standing.
-    /// Rule violations are reported with <see cref="InvalidOperationException"/>; the turn is not spent.
+    /// A turn-based battle of two or more characters.
+    /// <para>
+    /// A round is a sequence of actions in the order of a queue. The queue is built at the start of every round:
+    /// a character with speed S gets max(1, S div 100) actions, the k-th of them at the time k x 100 / S;
+    /// the actions are sorted by time and, at equal time, by the position of the character in the party.
+    /// With equal speeds this is simply "in turn". The battle ends when at most one character is left standing.
+    /// </para>
+    /// <para>
+    /// Rule violations are reported with <see cref="InvalidOperationException"/> and the turn is not spent.
+    /// Every action is written to <see cref="History"/>, and <see cref="GetProgress"/> / <see cref="Restore"/>
+    /// let a battle in progress be saved and continued.
+    /// </para>
     /// </summary>
     public class Battle
     {
+        /// <summary>Passes the messages on and keeps them, so a step of the history knows what was reported.</summary>
+        private sealed class RecordingLogger : IGameLogger
+        {
+            private readonly IGameLogger _inner;
+
+            public RecordingLogger(IGameLogger inner)
+            {
+                _inner = inner;
+            }
+
+            public List<string> Lines { get; } = new List<string>();
+
+            public void Log(string message)
+            {
+                Lines.Add(message);
+                _inner.Log(message);
+            }
+        }
+
         private readonly List<Character> _participants;
         private readonly IGameLogger _logger;
-        private int _turn;
+        private readonly GameRules _rules;
+        private readonly List<TurnRecord> _history = new List<TurnRecord>();
+        private List<int> _queue = new List<int>();
+        private int _queueIndex;
 
         /// <exception cref="ArgumentException">Fewer than two participants, a repeated one or a defeated one.</exception>
-        public Battle(IEnumerable<Character> participants, IGameLogger logger)
+        public Battle(IEnumerable<Character> participants, IGameLogger logger, GameRules? rules = null)
         {
             ArgumentNullException.ThrowIfNull(participants);
             ArgumentNullException.ThrowIfNull(logger);
@@ -50,17 +87,73 @@ namespace GameSystem.Engine
             }
 
             _logger = logger;
+            _rules = rules ?? GameRules.Default;
             Round = 1;
             foreach (var participant in _participants)
             {
                 participant.ResetDefense();
             }
+            _queue = BuildQueue();
+        }
+
+        private Battle(List<Character> participants, IGameLogger logger, GameRules rules, BattleProgress progress)
+        {
+            _participants = participants;
+            _logger = logger;
+            _rules = rules;
+            Round = progress.Round;
+            Actions = progress.Actions;
+            _queue = progress.Queue.ToList();
+            _queueIndex = progress.QueueIndex;
+            _history.AddRange(progress.History);
+        }
+
+        /// <summary>Continues a battle that was saved with <see cref="GetProgress"/>.</summary>
+        /// <exception cref="ArgumentException">The participants or the progress cannot belong to a battle in progress.</exception>
+        public static Battle Restore(IEnumerable<Character> participants, IGameLogger logger,
+                                     BattleProgress progress, GameRules? rules = null)
+        {
+            ArgumentNullException.ThrowIfNull(participants);
+            ArgumentNullException.ThrowIfNull(logger);
+            ArgumentNullException.ThrowIfNull(progress);
+
+            var list = participants.ToList();
+            if (list.Count < 2)
+            {
+                throw new ArgumentException("A battle needs at least two participants.");
+            }
+            if (list.Distinct().Count() != list.Count)
+            {
+                throw new ArgumentException("A character cannot take part in a battle twice.");
+            }
+            if (progress.Round < 1 || progress.Actions < 0)
+            {
+                throw new ArgumentException("The saved progress is not valid.");
+            }
+            if (progress.Queue.Count == 0
+                || progress.QueueIndex < 0
+                || progress.QueueIndex >= progress.Queue.Count
+                || progress.Queue.Any(i => i < 0 || i >= list.Count))
+            {
+                throw new ArgumentException("The saved turn order is not valid.");
+            }
+            if (list.Count(p => p.IsAlive) < 2)
+            {
+                throw new ArgumentException("A battle in progress needs at least two living characters.");
+            }
+
+            var battle = new Battle(list, logger, rules ?? GameRules.Default, progress);
+            if (!battle.Current.IsAlive)
+            {
+                throw new ArgumentException("The saved turn belongs to a defeated character.");
+            }
+            return battle;
         }
 
         public IReadOnlyList<Character> Participants => _participants.AsReadOnly();
 
         /// <summary>The character whose turn it is.</summary>
-        public Character Current => _participants[_turn];
+        public Character Current => _participants[_queue[_queueIndex]];
 
         public int Round { get; private set; }
 
@@ -72,10 +165,21 @@ namespace GameSystem.Engine
         /// <summary>The last character standing; null while the battle goes on or when nobody is left.</summary>
         public Character? Winner { get; private set; }
 
+        /// <summary>The steps made so far, the first one first.</summary>
+        public IReadOnlyList<TurnRecord> History => _history.AsReadOnly();
+
+        /// <summary>The names of the living characters in the order they act in the rest of the round (the current one first).</summary>
+        public IReadOnlyList<string> UpcomingOrder =>
+            _queue.Skip(_queueIndex).Where(i => _participants[i].IsAlive).Select(i => _participants[i].Name).ToList();
+
         /// <summary>The result of the battle; null while it goes on.</summary>
         public BattleOutcome? Outcome => IsOver
             ? new BattleOutcome(Winner?.Name, _participants.Select(p => p.Name).ToList(), Round, Actions)
             : null;
+
+        /// <summary>A copy of everything needed (besides the characters) to continue the battle later.</summary>
+        public BattleProgress GetProgress() =>
+            new BattleProgress(Round, _queue.ToList(), _queueIndex, Actions, _history.ToList());
 
         // ---------- actions of the current character ----------
 
@@ -84,16 +188,14 @@ namespace GameSystem.Engine
             EnsureRunning();
             RequireOpponent(target);
 
-            Current.Attack(target, _logger);
-            EndTurn();
+            Act("attack", target, log => Current.Attack(target, log));
         }
 
         public void Defend()
         {
             EnsureRunning();
 
-            Current.PrepareDefense(_logger);
-            EndTurn();
+            Act("defend", null, log => Current.PrepareDefense(log));
         }
 
         /// <summary>Heals a participant (also the acting character itself).</summary>
@@ -110,8 +212,7 @@ namespace GameSystem.Engine
                 throw new ArgumentOutOfRangeException(nameof(amount), "The amount must be positive.");
             }
 
-            target.Heal(amount, _logger);
-            EndTurn();
+            Act("heal", target, log => target.Heal(amount, log));
         }
 
         /// <param name="target">The opponent.</param>
@@ -121,19 +222,23 @@ namespace GameSystem.Engine
             EnsureRunning();
             RequireOpponent(target);
 
-            if (ability == null)
+            if (ability != null && !Current.HasAbility(ability))
             {
-                Current.UseSpecialAbility(target, _logger);
+                throw new InvalidOperationException($"{Current.Name} does not know '{ability.Name}'.");
             }
-            else
+
+            string name = ability?.Name ?? Current.UniqueAbility.Name;
+            Act($"ability {name}", target, log =>
             {
-                if (!Current.HasAbility(ability))
+                if (ability == null)
                 {
-                    throw new InvalidOperationException($"{Current.Name} does not know '{ability.Name}'.");
+                    Current.UseSpecialAbility(target, log);
                 }
-                Current.UseAbility(ability, target, _logger);
-            }
-            EndTurn();
+                else
+                {
+                    Current.UseAbility(ability, target, log);
+                }
+            });
         }
 
         /// <summary>The state of the battle as a renderable (the presentation layer sets the renderer).</summary>
@@ -144,8 +249,13 @@ namespace GameSystem.Engine
                     !IsOver && ReferenceEquals(p, Current)))
                 .ToList();
 
-            return new Renderable<BattleBoard>(
-                new BattleBoard(Round, IsOver ? string.Empty : Current.Name, rows, IsOver, Winner?.Name));
+            return new Renderable<BattleBoard>(new BattleBoard(
+                Round,
+                IsOver ? string.Empty : Current.Name,
+                rows,
+                IsOver,
+                Winner?.Name,
+                IsOver ? Array.Empty<string>() : UpcomingOrder));
         }
 
         // ---------- rules ----------
@@ -180,6 +290,18 @@ namespace GameSystem.Engine
             }
         }
 
+        /// <summary>Performs the action, writes it to the history and passes the turn on.</summary>
+        private void Act(string action, Character? target, Action<IGameLogger> perform)
+        {
+            Character actor = Current;
+            var recorder = new RecordingLogger(_logger);
+
+            perform(recorder);
+
+            _history.Add(new TurnRecord(_history.Count + 1, Round, actor.Name, action, target?.Name, recorder.Lines.ToList()));
+            EndTurn();
+        }
+
         private void EndTurn()
         {
             Actions++;
@@ -197,19 +319,44 @@ namespace GameSystem.Engine
 
             do
             {
-                _turn++;
-                if (_turn == _participants.Count)
+                _queueIndex++;
+                if (_queueIndex >= _queue.Count)
                 {
-                    _turn = 0;
                     Round++;
                     foreach (var participant in _participants)
                     {
                         participant.ResetDefense();
                     }
+                    _queue = BuildQueue();
+                    _queueIndex = 0;
                     _logger.Log($"--- Round {Round} ---");
                 }
             }
-            while (!_participants[_turn].IsAlive);
+            while (!Current.IsAlive);
+        }
+
+        /// <summary>The order of the actions of a round (indices of the participants), see the class description.</summary>
+        private List<int> BuildQueue()
+        {
+            var slots = new List<(double Time, int Index)>();
+
+            for (int i = 0; i < _participants.Count; i++)
+            {
+                Character participant = _participants[i];
+                if (!participant.IsAlive)
+                {
+                    continue;
+                }
+
+                int speed = Math.Max(1, participant.Speed);
+                int actions = Math.Max(1, speed / _rules.BaseSpeed);
+                for (int k = 1; k <= actions; k++)
+                {
+                    slots.Add((k * (double)_rules.BaseSpeed / speed, i));
+                }
+            }
+
+            return slots.OrderBy(s => s.Time).ThenBy(s => s.Index).Select(s => s.Index).ToList();
         }
     }
 }

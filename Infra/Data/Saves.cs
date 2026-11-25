@@ -20,6 +20,8 @@ namespace Infra.Data
         public List<ItemData> Items { get; set; } = new List<ItemData>();
         public List<CharacterItems> ItemLinks { get; set; } = new List<CharacterItems>();
         public List<CharacterAbilities> AbilityLinks { get; set; } = new List<CharacterAbilities>();
+        /// <summary>The battle that was in progress when the game was saved (null when there was none).</summary>
+        public BattleStateData? Battle { get; set; }
     }
 
     public class TextSave : SaveBase

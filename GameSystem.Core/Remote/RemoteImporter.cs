@@ -103,16 +103,16 @@ namespace GameSystem.Core.Remote
 
         private static CustomAbility ToAbility(RemoteTalent talent)
         {
-            var (hits, bonus) = Mechanics(talent.Unlock);
-            return new CustomAbility(talent.Name, hits, bonus, Clean(talent.Description));
+            var (hits, bonus, kind, penetration) = Mechanics(talent.Unlock);
+            return new CustomAbility(talent.Name, hits, bonus, Clean(talent.Description), kind, penetration);
         }
 
-        private static (int Hits, int Bonus) Mechanics(string? unlock)
+        private static (int Hits, int Bonus, DamageKind Kind, double Penetration) Mechanics(string? unlock)
         {
-            string kind = (unlock ?? string.Empty).ToLowerInvariant();
-            if (kind.Contains("burst")) return (3, 6);
-            if (kind.Contains("skill")) return (2, 3);
-            return (1, 0);
+            string name = (unlock ?? string.Empty).ToLowerInvariant();
+            if (name.Contains("burst")) return (3, 6, DamageKind.Magic, 0.10);
+            if (name.Contains("skill")) return (2, 3, DamageKind.Magic, 0.0);
+            return (1, 0, DamageKind.Physical, 0.0);
         }
 
         private static int Rank(string? unlock)

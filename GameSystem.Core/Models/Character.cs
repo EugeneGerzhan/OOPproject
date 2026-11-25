@@ -25,7 +25,11 @@ namespace GameSystem.Core.Models
         public int AttackPower => _attackPower;
         public bool IsAlive => _health > 0;
         public bool IsDefending => _isDefending;
+        /// <summary>The fraction (0..1) of the damage that the character ignores.</summary>
+        public double Resist { get; private set; }
 
+        /// <summary>Initiative: 100 is one action per round; more means acting earlier and sometimes more than once.</summary>
+        public int Speed { get; private set; } = 100;
         public Item? EquippedItem { get; private set; }
         public IAbility UniqueAbility { get; }
 
@@ -96,7 +100,12 @@ namespace GameSystem.Core.Models
             return true;
         }
 
-        public virtual void Attack(Character target, IGameLogger logger)
+        /// <summary>A plain physical attack.</summary>
+        public virtual void Attack(Character target, IGameLogger logger) =>
+            Attack(target, logger, AttackProfile.Physical);
+
+        /// <summary>An attack with the given profile (physical or magic, with or without resist penetration).</summary>
+        public virtual void Attack(Character target, IGameLogger logger, AttackProfile profile)
         {
             if (!IsAlive) return;
 
@@ -106,10 +115,12 @@ namespace GameSystem.Core.Models
                 return;
             }
 
-            int effectiveArmor = target.IsDefending ? target.Armor * 2 : target.Armor;
-            int damage = Math.Max(1, _attackPower - effectiveArmor);
+            int damage = DamageCalculator.Calculate(
+                _attackPower, target.Armor, target.Resist, target.IsDefending, profile, GameRules.Default);
 
-            logger.Log($"{Name} attacks {target.Name} for {damage} damage.");
+            logger.Log(profile.Kind == DamageKind.Magic
+                ? $"{Name} hits {target.Name} with magic for {damage} damage."
+                : $"{Name} attacks {target.Name} for {damage} damage.");
             target.TakeDamage(damage, logger);
         }
 
@@ -159,6 +170,21 @@ namespace GameSystem.Core.Models
                     _learnedAbilities.Add(ability);
                 }
             }
+        }
+        /// <summary>Sets the combat stats that are not part of the constructor.</summary>
+        public void SetCombatStats(double resist, int speed)
+        {
+            if (resist < 0.0 || resist > 1.0)
+            {
+                throw new ArgumentOutOfRangeException(nameof(resist), "Resist must be between 0 and 1.");
+            }
+            if (speed < 1)
+            {
+                throw new ArgumentOutOfRangeException(nameof(speed), "Speed must be at least 1.");
+            }
+
+            Resist = resist;
+            Speed = speed;
         }
         public void Heal(int amount, IGameLogger logger)
         {

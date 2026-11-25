@@ -63,6 +63,9 @@ Out of scope for this version: a graphical interface, network play, saving of a 
 | Start the game | `game start <A> <B> [...]` (two or more characters, by name or id) |
 | Actions in the main loop | `game attack <target>`, `game defend`, `game heal [<target>] [--amount <hp>]`, `game ability <target> [--id <ability>]`, `game status`, `game stop` |
 | Save state and results | State of the characters: `save` / `load`. Results of finished battles are saved automatically; `game results` shows them |
+| Step history | `game history` shows every action with the messages it caused (also for the last finished or abandoned battle) |
+| Save the state of the game | `game save <name>` saves the characters, their stats and the battle in progress; `game load <name>` restores them |
+| Load new characters | `remote import char <id>`, `create char`, `game load <name>` |
 
 **Theme 3: structured text editor**
 | Requirement | Implementation |
@@ -211,29 +214,39 @@ All saved data live in one JSON file, `saves.json` (class `Repository`):
 | `CharacterSaves` | Named saves: characters, items, abilities and the links between them |
 | `TextSaves` | Named saves: the document as a tree of nodes |
 | `BattleResults` | Winner, participants, rounds, actions and time of every finished battle |
+| `CharacterSaves[..].Battle` | A battle in progress: participants, turn order, round, actions and the history of steps |
 
 The storage is replaceable (`IRepositoryStorage`); `SaveManager` offers named saves on top of it. An older file
 without `BattleResults` still loads.
 
-## 6. Remote catalog
-`GenshinApiClient` is an HTTP client for the service at https://genshin.jmp.blue (project: genshindev/api).
-It uses the endpoints `characters`, `characters/{id}`, `weapons` and `weapons/{id}` and converts the JSON to
-`RemoteCharacter` and `RemoteWeapon`. The parser is tolerant: only the name is required.
-The link to the graphics is the `image` field of the answer; when it is absent, the client builds it from the
-endpoint `characters/{id}/card`.
+## 6. Business logic: character catalog (Theme 1)
 
-`RemoteImporter` translates remote data to the game:
+### 6.1 Purpose
+The business logic of the catalog turns the JSON of the remote service into models that the graphical interface
+can show without any processing. The GUI only has to make a view model out of a `CharacterCard`.
 
-| Remote data | Game object |
+### 6.2 Pipeline
+| Step | Class | Result |
+|---|---|---|
+| Request | `GenshinApiClient` (Infra.WebApi) | JSON text; network and status errors become `RemoteApiException` |
+| Parsing | `GenshinJsonParser` | `RemoteCharacter` / `RemoteWeapon` (tolerant: only the name is required) |
+| Catalog | `CharacterCatalog` (Core) | `CharacterCard` objects in memory |
+| Game object | `RemoteImporter` | `ApiCharacter`, `Item` (see 8.7) |
+
+### 6.3 The models for the GUI
+`CharacterCard` holds the id, name, title, vision, weapon type, rarity, nation, affiliation, description, the link to
+the image, and lists of `TalentCard` (skills and passives). Nothing in it is null.
+
+### 6.4 `CharacterCatalog`
+| Operation | Meaning |
 |---|---|
-| Character | `ApiCharacter` with a profile |
-| Stats (the service has none) | Generated from a range that depends on the rarity of the character |
-| Talents | Abilities (burst: 3 hits, skill: 2 hits, others: 1 hit); the burst is the unique ability |
-| Weapon | `Item` (attack bonus is base attack / 5, health and armor bonus depend on rarity) |
+| `RefreshAsync(maxParallel)` | Loads the list of ids, then the card of every character, several requests at a time. A character that cannot be loaded is reported in `CatalogRefreshResult.Failed`; if the list itself cannot be loaded, the old cards stay |
+| `GetAsync(id)` | The card from memory, or from the service (then it is kept) |
+| `Find(id)` | A loaded card or `null` |
+| `Search(filter)` | `CatalogFilter`: text (name, title, id), vision, weapon type, minimal rarity, sort (name, rarity, vision) |
 
-If the service is unavailable, the application can run with `--offline` and uses built-in samples
-(`OfflineGameDataApi`), parsed by the same parser.
-
+The link to the graphics is the `image` field of the answer; when it is absent, it is built from the endpoint
+`characters/{id}/card`. If the service is down, the offline sample data are used (`--offline`).
 ## 7. Command line interface (detailed)
 
 ### 7.1 Purpose and principles
@@ -405,32 +418,225 @@ the core provides the data and the CLI sets the renderer (`BattleBoardRenderer`,
 * **Undo for a command:** wrap it in `UndoableCommand`.
 * **A graphical interface:** a new project in the presentation layer that reuses Core, Data and WebApi.
 
-## 8. Theme 2: text game
+## 8. Business logic: game mechanics (Theme 2)
 
+### 8.1 Structure
 ```mermaid
-stateDiagram-v2
-    [*] --> NoBattle
-    NoBattle --> Running: game start A B ...
-    Running --> Running: attack / defend / heal / ability
-    Running --> NoBattle: game stop
-    Running --> Finished: one character left standing
-    Finished --> NoBattle: result saved
-    Running --> NoBattle: load (state replaced)
+classDiagram
+    direction LR
+    class Battle {
+        +Round
+        +Current
+        +Actions
+        +History
+        +Attack(Character)
+        +Defend()
+        +Heal(Character, int)
+        +UseAbility(Character, IAbility)
+        +GetProgress() BattleProgress
+        +Restore(...)$ Battle
+        +CreateView() IRenderable
+    }
+    class TurnRecord {
+        +Number
+        +Round
+        +Actor
+        +Action
+        +Target
+        +Messages
+    }
+    class BattleProgress {
+        +Round
+        +Queue
+        +QueueIndex
+        +Actions
+        +History
+    }
+    class GameRules {
+        +MinimumDamage
+        +DefenseArmorMultiplier
+        +DefenseResistBonus
+        +MaxResist
+        +MagicScale
+        +BaseSpeed
+    }
+    class DamageCalculator {
+        +Calculate(...)$ int
+    }
+    class AttackProfile {
+        +Kind
+        +ResistPenetration
+    }
+    class Character {
+        +Health
+        +Armor
+        +AttackPower
+        +Resist
+        +Speed
+        +Attack(Character, IGameLogger, AttackProfile)
+        +Heal(int, IGameLogger)
+        +PrepareDefense(IGameLogger)
+    }
+    class ApiCharacter {
+        +Profile
+    }
+    class CharacterProfile
+    class Item
+    class IAbility {
+        <<interface>>
+        +Execute(Character, Character, IGameLogger)
+    }
+    class CustomAbility {
+        +Kind
+        +ResistPenetration
+    }
+    class GameState
+    class CharacterSave
+    class BattleStateData
+    Battle o-- "2..*" Character
+    Battle o-- "*" TurnRecord
+    Battle ..> GameRules
+    Battle ..> BattleProgress : saves / restores
+    Character ..> DamageCalculator
+    DamageCalculator ..> AttackProfile
+    DamageCalculator ..> GameRules
+    Character <|-- ApiCharacter
+    ApiCharacter --> CharacterProfile
+    Character --> "0..1" Item
+    Character o-- "*" IAbility
+    IAbility <|.. CustomAbility
+    GameState o-- "*" Character
+    CharacterSave --> "0..1" BattleStateData
 ```
-**Rules.** A battle has two or more characters. They act in the given order, one action per turn. A round ends
-when every living character has acted. Defense lasts until the next round. The winner is the last character
-standing. After a `load` the battle is abandoned, because it belongs to the replaced state.
 
-**Typical session**
+| Reference design | Code |
+|---|---|
+| `Game` (`setupGame`, `startGame`) | `Battle` (constructor / `Restore`), `GameStrategy` in the CLI |
+| `GameConfig` (loaded from persistence) | `CharacterSave` with `BattleStateData` |
+| `Turn` (`act`, `beginTurn`) | `TurnRecord` (one action); the start of a round builds the queue |
+| `Character` (`attack`, `heal`, `action`, `checkStatus`) | `Character` (`Attack`, `Heal`, `UseAbility`, `IsAlive`) |
+| `CharacterProfile` | `CharacterProfile` of `ApiCharacter` (data of the remote database) |
+| `Item`, `Ability` | `Item`, `IAbility` / `CustomAbility` |
+
+### 8.2 Characteristics
+| Characteristic | Meaning |
+|---|---|
+| Health (`Health`, `MaxHealth`) | How alive the character is; 0 means defeated |
+| Damage (`AttackPower`) | The damage it deals; items and abilities add to it |
+| Armor | Flat defense: how much damage is blocked directly |
+| Resist (0..1) | The fraction of damage that is ignored, at most 90% counts |
+| Speed (default 100) | Initiative, see 8.4 |
+
+Items add to health, armor and attack. Abilities raise the attack for their hits. Stats of characters from the remote
+database are generated from ranges that depend on rarity (the service has no stats).
+
+### 8.3 Damage formulas
 ```
-> game roster
-> game start Albedo Amber
-> game attack Amber
-> game defend
-> game status
-> game results
+Notation: A = attack power (with items), AR = armor of the target, R = resist of the target,
+          P = resist penetration of the attack (0 for ordinary attacks), M = MinimumDamage (1),
+          S = MagicScale (0.75), K = 2 (defense armor multiplier), D = 0.25 (defense resist bonus)
+
+Physical attack
+    armor_eff   = AR x (K if the target defends else 1)
+    base        = max(M, A - armor_eff)
+    resist_eff  = clamp(R - P, 0, 0.9)
+    damage      = max(M, round(base x (1 - resist_eff)))
+
+Magic attack (ignores armor)
+    base        = max(M, A x S)
+    resist_eff  = clamp(R - P + (D if the target defends else 0), 0, 0.9)
+    damage      = max(M, round(base x (1 - resist_eff)))
+
+Healing
+    health      = min(MaxHealth, health + amount)        (resist does not apply)
 ```
-The result of a finished battle (winner, participants, rounds, actions, time) is appended to `saves.json`.
+```mermaid
+flowchart TD
+    A["attack, armor, resist, defending?, kind, penetration"] --> K{"Kind?"}
+    K -- Physical --> P1["armor_eff = armor x (2 if defending else 1)"]
+    P1 --> P2["base = max(MinDamage, attack - armor_eff)"]
+    K -- Magic --> M1["base = max(MinDamage, attack x MagicScale)"]
+    M1 --> M2["if defending: resist + 0.25"]
+    P2 --> R["resist_eff = clamp(resist - penetration, 0, 0.9)"]
+    M2 --> R
+    R --> F["damage = max(MinDamage, round(base x (1 - resist_eff)))"]
+```
+Rounding is "away from zero". The numbers are the constants of `GameRules`, so the balance is changed in one place.
+Example: attack 20 against armor 8 gives 12; against resist 25% it gives 9; a magic attack with the same attack gives 15
+and does not care about the armor. Deviation from the textbook formula: a hit that is not completely blocked deals at
+least `MinimumDamage` (1, "chip damage"); with `MinimumDamage = 0` armor can block a hit completely.
+
+**Abilities.** `CustomAbility` makes N hits with a temporary attack bonus; each hit uses the formula of its kind
+(physical or magic) and may ignore a part of resist. The talents of imported characters become: normal attack, one
+physical hit; skill, two magic hits (+3 attack); burst, three magic hits (+6 attack, ignores 10% of resist).
+
+**Defense.** `Defend` uses the action of the turn. Until the start of the next round the armor against physical
+attacks doubles and the resist against magic grows by 25 points.
+
+### 8.4 Turns, rounds and speed
+```mermaid
+flowchart TD
+    S["Start of a round"] --> Q["Build the queue: every living character gets max(1, speed div 100) slots at times k x 100 / speed"]
+    Q --> O["Sort by time, then by position in the party"]
+    O --> N{"Next slot"}
+    N -- "actor is defeated" --> N
+    N -- "actor is alive" --> ACT["The actor performs one action"]
+    ACT --> W{"At most one character alive?"}
+    W -- yes --> END["Battle over: winner, result saved"]
+    W -- no --> E{"Queue finished?"}
+    E -- no --> N
+    E -- yes --> S
+```
+| Speed | Actions per round | Times |
+|---|---|---|
+| 90 | 1 | 1.11 (after the speed-100 characters) |
+| 100 | 1 | 1.00 |
+| 150 | 1 | 0.67 (before the speed-100 characters) |
+| 200 | 2 | 0.50 and 1.00 |
+
+Example: A (speed 200), B (100), C (150) act in the order A, C, A, B. With equal speeds the order is the order of the
+party. Defense is reset at the start of every round.
+
+### 8.5 Actions and rules
+| Action | Rule |
+|---|---|
+| `attack <target>` | Physical attack on a living opponent (not itself, not a stranger) |
+| `defend` | See 8.3 |
+| `heal [<target>] [--amount n]` | Heals a living participant (default: itself, 15 HP) |
+| `ability <target> [--id <ability>]` | The unique ability, or an ability the character has learned |
+| End of the battle | At most one character is left: it wins (or a draw if nobody is left) |
+
+A rejected action does not spend the turn and is not written to the history.
+
+### 8.6 History and saving
+Every action is a `TurnRecord`: number, round, actor, action, target and all messages it caused (damage, defeat).
+`game history` shows them; after the end or `game stop` the history of the last battle stays available.
+
+`game save <name>` writes a `CharacterSave` with the characters (including resist, speed, items, abilities) and, when a
+battle is running, a `BattleStateData`:
+```json
+"Battle": {
+  "ParticipantIds": [1, 2],
+  "Round": 1,
+  "Queue": [0, 1],
+  "QueueIndex": 1,
+  "Actions": 1,
+  "History": [ { "Number": 1, "Round": 1, "Actor": "Growler", "Action": "attack",
+                 "Target": "Shi Fuu", "Messages": ["Growler attacks Shi Fuu for 12 damage."] } ]
+}
+```
+The queue is saved as it is, so a round in the middle (also with extra actions) is continued exactly. `game load`
+builds everything first and replaces the state only after the user confirms, so a damaged save changes nothing.
+The result of a finished battle is appended to `BattleResults`.
+
+### 8.7 New characters
+`remote import char <id>` loads a character of the remote database (stats are generated for its rarity, talents become
+abilities), `create char` makes one through a dialog, `game load <name>` brings back a saved party. All of them appear in
+`game roster`.
+
+### 8.8 Not included
+Status effects, buffs and debuffs (the "bonus" and "debuff" terms of the extended magic formula), critical hits and
+elements are not part of this version; `GameRules` and `AttackProfile` are the places where they would be added.
 
 ## 9. Theme 3: structured text editor
 
@@ -495,7 +701,7 @@ The console and the network are replaced by test doubles (`DisplayerMock`, `Inpu
 `StubHttpMessageHandler`, `FakeGameDataApi`, `InMemoryStorage`). Run them with `dotnet test`.
 
 ## 11. Limitations and future work
-* A battle in progress is not saved: the state of the characters and the results are.
+* Status effects (buffs, debuffs) are not implemented; the saved battle continues exactly, but only one battle can be saved per save slot.
 * There is no redo, and `undo` is available only in the text mode.
 * `help` describes the commands of its own strategy; `commands` lists all of them.
 * The remote service may be unavailable; `--offline` is the fallback.

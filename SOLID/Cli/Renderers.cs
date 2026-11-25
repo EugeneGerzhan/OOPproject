@@ -31,6 +31,10 @@ public sealed class BattleBoardRenderer : IRenderer<BattleBoard>
         else
         {
             lines.Add($"Turn: {board.CurrentName}");
+            if (board.Order is { Count: > 0 })
+            {
+                lines.Add($"Order: {string.Join(" > ", board.Order)}");
+            }
         }
 
         return string.Join(Environment.NewLine, lines);
@@ -77,6 +81,27 @@ public sealed class ResultsRenderer : IRenderer<IReadOnlyList<BattleResultData>>
             string outcome = result.Winner != null ? $"{result.Winner} wins" : "draw";
             string who = string.Join(" vs ", result.Participants);
             lines.Add($"  {result.FinishedAt:yyyy-MM-dd HH:mm}  {outcome} ({who}, {result.Rounds} round(s), {result.Actions} action(s))");
+        }
+
+        return string.Join(Environment.NewLine, lines);
+    }
+}
+
+/// <summary>Shows the history of a battle: every step with the messages it caused.</summary>
+public sealed class TurnHistoryRenderer : IRenderer<IReadOnlyList<TurnRecord>>
+{
+    public string Render(IReadOnlyList<TurnRecord> history)
+    {
+        var lines = new List<string> { "=== BATTLE HISTORY ===" };
+
+        foreach (TurnRecord turn in history)
+        {
+            string target = turn.Target != null ? $" -> {turn.Target}" : string.Empty;
+            lines.Add($"  #{turn.Number} (round {turn.Round}) {turn.Actor}: {turn.Action}{target}");
+            foreach (string message in turn.Messages)
+            {
+                lines.Add($"      {message}");
+            }
         }
 
         return string.Join(Environment.NewLine, lines);

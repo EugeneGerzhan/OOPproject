@@ -37,6 +37,8 @@ public class CharacterSheetBuilder
             .AddParagraph($"Health: {character.Health}/{character.MaxHealth}")
             .AddParagraph($"Armor: {character.Armor}")
             .AddParagraph($"Attack: {character.AttackPower}")
+            .AddParagraph($"Resist: {Math.Round(character.Resist * 100)}%")
+            .AddParagraph($"Speed: {character.Speed}")
             .AddParagraph($"Status: {(character.IsAlive ? "alive" : "defeated")}")
             .EndHeading();
 

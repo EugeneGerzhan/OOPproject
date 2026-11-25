@@ -1,7 +1,8 @@
 {
   "profiles": {
     "SOLID": {
-      "commandName": "Project"
+      "commandName": "Project",
+      "commandLineArgs": "--chars --offline\r\n"
     }
   }
 }

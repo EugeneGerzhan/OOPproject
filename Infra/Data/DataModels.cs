@@ -23,13 +23,21 @@ namespace Infra.Data
                               string Nation, string Affiliation, string Description, int Rarity);
 
     public record CharacterData(int Id, string Name, string Class, int Health, int MaxHealth, int Armor,
-                                int AttackPower, int UniqueAbilityId, ProfileData? Profile = null);
+                            int AttackPower, int UniqueAbilityId, ProfileData? Profile = null,
+                            double Resist = 0.0, int Speed = 100);
+
+    public record AbilityData(int Id, string Type, string Name, int Hits, int AttackBonus,
+                              string? Description = null, string? Kind = null, double ResistPenetration = 0.0);
+
+    /// <summary>One step (action) of a battle, as saved.</summary>
+    public record TurnData(int Number, int Round, string Actor, string Action, string? Target, List<string> Messages);
+
+    /// <summary>A battle in progress, as saved: who fights, whose turn it is and what has happened so far.</summary>
+    public record BattleStateData(List<int> ParticipantIds, int Round, List<int> Queue, int QueueIndex,
+                                  int Actions, List<TurnData> History);
 
     public record ItemData(int Id, string Name, int HealthBonus, int ArmorBonus, int AttackBonus,
                            string? Description = null);
-
-    public record AbilityData(int Id, string Type, string Name, int Hits, int AttackBonus,
-                              string? Description = null);
 
     public record CharacterItems(int Id, int CharacterId, int ItemId);
 
