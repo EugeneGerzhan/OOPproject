@@ -471,6 +471,9 @@ namespace OOPproject.SOLID
             _ui.Show("  sheet <id/name>                                   - structured-text character sheet");
             _ui.Show("  game <roster|start|status|attack|defend|heal|ability|stop|results> - the text game (battle)");
             _ui.Show("  commands                                         - list the commands of all strategies");
+            _ui.Show("  game continue                                      - continue from the last save (also offered at start-up)");
+            _ui.Show("  autosave [on|off] | storage                        - automatic saving, where the data live");
+            _ui.Show("  remote portrait <id> | portraits | cache [clear]   - pictures of characters and their local cache");
             _ui.Show("  exit                                             - quit");
         }
 

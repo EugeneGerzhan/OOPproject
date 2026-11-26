@@ -28,7 +28,13 @@ namespace Infra.Data
     {
         public TextNodeData? TextRoot { get; set; }
     }
-
+    
+    /// <summary>The version of the format of the saves file.</summary>
+    public static class RepositoryFormat
+    {
+        /// <summary>Raise it when the format changes in a way older programs cannot read.</summary>
+        public const int CurrentVersion = 1;
+    }
     /// <summary>Everything that is written to the file: all named saves of both systems.</summary>
     public class Repository
     {
@@ -36,5 +42,11 @@ namespace Infra.Data
         public Dictionary<string, CharacterSave> CharacterSaves { get; set; } = new Dictionary<string, CharacterSave>();
         public Dictionary<string, TextSave> TextSaves { get; set; } = new Dictionary<string, TextSave>();
         public List<BattleResultData> BattleResults { get; set; } = new List<BattleResultData>();
+
+        /// <summary>The version of the format this file was written in.</summary>
+        public int Version { get; set; } = RepositoryFormat.CurrentVersion;
+
+        /// <summary>The name of the character save (an autosave counts too) that was written last.</summary>
+        public string? LastCharacterSave { get; set; }
     }
 }

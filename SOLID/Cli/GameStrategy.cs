@@ -18,7 +18,7 @@ namespace OOPproject.SOLID;
 /// </summary>
 public sealed class GameStrategy : CommandStrategyBase
 {
-    private const string Usage = "Usage: game <roster|start|status|history|attack|defend|heal|ability|stop|save|load|results> [...]";
+    private const string Usage = "Usage: game <roster|start|status|history|attack|defend|heal|ability|stop|save|load|continue|results> [...]";
     private const string TurnHint = "Use: game attack <target> | defend | heal [<target>] [--amount <hp>] | ability <target> [--id <ability>] | stop";
     private const int DefaultHealAmount = 15;
 
@@ -73,6 +73,7 @@ public sealed class GameStrategy : CommandStrategyBase
                 case "stop": Stop(); break;
                 case "save": SaveGame(rest); break;
                 case "load": LoadGame(rest); break;
+                case "continue": ContinueFromLastSave(true); break;
                 case "results": ShowResults(); break;
                 default: _ui.Show(Usage); break;
             }
@@ -232,6 +233,25 @@ public sealed class GameStrategy : CommandStrategyBase
         _ui.Show($"Game saved as '{name}' ({_saves.Location}). Battle in progress: {(running != null ? "yes" : "no")}.");
     }
 
+    /// <summary>The battle that is running now (null when there is none).</summary>
+    public Battle? CurrentBattle =>
+        _battle != null && ReferenceEquals(_battleState, _session.State) ? _battle : null;
+
+    /// <summary>Continues from the most recent save (an autosave counts too).</summary>
+    /// <param name="askConfirmation">Ask before the current state is replaced (not needed at the start of the program).</param>
+    /// <returns>False when there is no save or the user cancelled.</returns>
+    public bool ContinueFromLastSave(bool askConfirmation)
+    {
+        string? name = _saves.LastCharacterSaveName;
+        if (name == null || !_saves.TryLoadCharacters(name, out var save))
+        {
+            _ui.Show("There is no save to continue from.");
+            return false;
+        }
+
+        return Apply(save, askConfirmation);
+    }
+
     // game load <name>: replaces the characters and the battle
     private void LoadGame(string[] rest)
     {
@@ -248,14 +268,19 @@ public sealed class GameStrategy : CommandStrategyBase
             return;
         }
 
+        Apply(save, askConfirmation: true);
+    }
+
+    private bool Apply(CharacterSave save, bool askConfirmation)
+    {
         // Everything is built first, so a damaged save changes nothing.
         GameState state = CharacterSaveMapper.ToGameState(save);
         Battle? battle = save.Battle == null ? null : BattleSaveMapper.ToBattle(save.Battle, state, _logger);
 
-        if (!_ui.Confirm("The current state will be replaced. Continue? (y/n): "))
+        if (askConfirmation && !_ui.Confirm("The current state will be replaced. Continue? (y/n): "))
         {
             _ui.Show("Loading cancelled.");
-            return;
+            return false;
         }
 
         _session.State = state;
@@ -267,6 +292,7 @@ public sealed class GameStrategy : CommandStrategyBase
             ? "no battle in progress"
             : $"battle restored (round {battle.Round}, turn of {battle.Current.Name})";
         _ui.Show($"Game '{save.SaveName}' loaded: {state.Characters.Count} character(s), {battleText}.");
+        return true;
     }
 
     // ---------- helpers ----------

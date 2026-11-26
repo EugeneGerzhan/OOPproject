@@ -459,6 +459,7 @@ namespace ProjectTests.EngineTests
             var running = StartedBattle();
             var save = CharacterSaveMapper.ToSave("game", _state);
             save.Battle = BattleSaveMapper.ToData(running, _state);
+
             var repository = new Repository();
             repository.CharacterSaves["game"] = save;
             var storage = new JsonRepositoryStorage(_path);

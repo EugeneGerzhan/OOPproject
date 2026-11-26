@@ -55,6 +55,7 @@ Out of scope for this version: a graphical interface, network play, saving of a 
 | Create a new character through a dialog | `create char` (name, class, optional id), also `create item` and `create ability` |
 | Save user data | `save <name>`, `load <name>`, `saves` (characters, items, abilities and their links) |
 | Extra | `remote import char <id>` and `remote import weapon <id>` bring remote data into the game; `add item` equips; `sheet <character>` prints a character sheet |
+| Download portraits into local files | `remote portrait <id>`, `remote portraits [--find <text>] [--limit <n>]` fill the picture cache; `remote cache [clear]` shows or empties it |
 
 **Theme 2: text game**
 | Requirement | Implementation |
@@ -66,6 +67,9 @@ Out of scope for this version: a graphical interface, network play, saving of a 
 | Step history | `game history` shows every action with the messages it caused (also for the last finished or abandoned battle) |
 | Save the state of the game | `game save <name>` saves the characters, their stats and the battle in progress; `game load <name>` restores them |
 | Load new characters | `remote import char <id>`, `create char`, `game load <name>` |
+| Continue from the last save | `game continue`, and the program offers to continue from the last save at start-up; the game is also saved automatically (`autosave [on\|off]`) |
+| Created characters survive a restart | They are part of every save and of the autosave |
+
 
 **Theme 3: structured text editor**
 | Requirement | Implementation |
@@ -206,18 +210,225 @@ such as `add` and `cd` work relative to it.
 `InvalidOperationException`; the turn is not spent. `Battle.CreateView()` returns the state as data
 (`BattleBoard`), without any text.
 
-## 5. Data design
-All saved data live in one JSON file, `saves.json` (class `Repository`):
+## 5. Persistence
 
-| Section | Content |
+### 5.1 What is stored
+| Data | Where | When it is written |
+|---|---|---|
+| Games: characters, items, abilities, their links, the battle in progress | `CharacterSaves` of `saves.json` | `save`, `game save`, and automatically (slot `autosave`) |
+| Documents of the text editor | `TextSaves` | `save` in the text mode |
+| Results of finished battles | `BattleResults` | automatically when a battle ends |
+| Pointer to the last save | `LastCharacterSave` | with every write of a game save |
+| Pictures (portraits) | `images/` folder, one file per picture | on the first request of a picture |
+
+### 5.2 Components
+```mermaid
+classDiagram
+    direction LR
+    class AppPaths {
+        +DataDirectory
+        +SavesFile
+        +ImagesDirectory
+        +ForCurrentUser()$ AppPaths
+        +MigrateLegacySaves(string)
+    }
+    class IRepositoryStorage {
+        <<interface>>
+        +Location
+        +Load() Repository
+        +Save(Repository)
+    }
+    class JsonRepositoryStorage {
+        -temp file + backup
+    }
+    class Repository {
+        +Version
+        +LastCharacterSave
+        +CharacterSaves
+        +TextSaves
+        +BattleResults
+    }
+    class SaveManager {
+        +SaveCharacters(CharacterSave)
+        +TryLoadCharacters(string)
+        +LastCharacterSaveName
+        +AddBattleResult(BattleResultData)
+    }
+    class CharacterSave {
+        +Characters
+        +Items
+        +Abilities
+        +Battle
+    }
+    class IImageSource {
+        <<interface>>
+        +DownloadAsync(string) DownloadedImage
+    }
+    class HttpImageSource
+    class OfflineImageSource
+    class ImageCache {
+        +Folder
+        +GetAsync(string, string) CachedImage
+        +List()
+        +Clear()
+    }
+    class AutoSaver {
+        +Enabled
+        +SaveIfChanged()
+    }
+    class Cli {
+        +AfterCommand
+    }
+    class GameStrategy {
+        +ContinueFromLastSave(bool)
+        +CurrentBattle
+    }
+    IRepositoryStorage <|.. JsonRepositoryStorage
+    JsonRepositoryStorage ..> Repository
+    SaveManager o-- IRepositoryStorage
+    Repository o-- "*" CharacterSave
+    IImageSource <|.. HttpImageSource
+    IImageSource <|.. OfflineImageSource
+    ImageCache o-- IImageSource
+    AutoSaver ..> SaveManager
+    AutoSaver ..> GameStrategy : reads the battle
+    Cli ..> AutoSaver : AfterCommand
+    GameStrategy ..> SaveManager
+    AppPaths ..> JsonRepositoryStorage : SavesFile
+    AppPaths ..> ImageCache : ImagesDirectory
+```
+The domain classes (`Character`, `Battle`, the document tree) know nothing about files. Mappers
+(`CharacterSaveMapper`, `BattleSaveMapper`, `TextMapper`) convert them to plain **data models** (`CharacterData`,
+`BattleStateData`, `TextNodeData` ...), and only the data models are serialized. A change of the domain
+classes therefore does not break old files, and the storage can be replaced (`IRepositoryStorage`) without
+touching the game.
+
+### 5.3 Format: why JSON
+| Option | Decision |
 |---|---|
-| `CharacterSaves` | Named saves: characters, items, abilities and the links between them |
-| `TextSaves` | Named saves: the document as a tree of nodes |
-| `BattleResults` | Winner, participants, rounds, actions and time of every finished battle |
-| `CharacterSaves[..].Battle` | A battle in progress: participants, turn order, round, actions and the history of steps |
+| JSON | **Chosen.** Compact, readable, supported by the standard library (`System.Text.Json`), handles nested data (a battle with its history, a document tree) naturally |
+| XML | Not used: most of the file would be service tags |
+| YAML | Not used: whitespace is part of the syntax and it is meant for configuration files |
+| Relational database (SQLite + ORM) | Not used: a single user, small data, hierarchical records and no queries across records, so tables and an ORM would only add mapping code. `IRepositoryStorage` is the place where a database could be plugged in later |
 
-The storage is replaceable (`IRepositoryStorage`); `SaveManager` offers named saves on top of it. An older file
-without `BattleResults` still loads.
+Ukrainian text is written as it is (not as `\u` escapes), so the file can be read and edited by hand.
+
+### 5.4 Where the files are
+The files are kept in a folder of the application in the data folder of the user, not next to the program:
+
+| System | Folder |
+|---|---|
+| Windows | `%LOCALAPPDATA%\CharacterBattler` |
+| Linux / macOS | `~/.local/share/CharacterBattler` |
+| Any | the folder named by the variable `CHARACTER_BATTLER_DATA` (portable use, tests) |
+
+```
+CharacterBattler/
+  saves.json        the repository
+  saves.json.bak    the previous version of it
+  images/           albedo-portrait.png ...
+```
+The command `storage` prints the real paths. Older versions wrote `saves.json` next to the program; at the first start
+such a file is copied to the new location (`AppPaths.MigrateLegacySaves`), nothing is overwritten.
+
+### 5.5 Safe writing and versions
+* **Atomic save.** `JsonRepositoryStorage.Save` writes the new content to `saves.json.tmp`, copies the current file to
+  `saves.json.bak` and moves the temporary file into place. A crash or a full disk in the middle leaves the old file intact.
+* **Backup.** If `saves.json` cannot be parsed, `Load` reads `saves.json.bak` (the previous version). If both are damaged,
+  an error is reported and nothing is overwritten.
+* **Version.** `Repository.Version` is the version of the format. A file with a version newer than the program knows is
+  refused with an explanation (no data are lost by an old program overwriting a newer file). New optional fields are
+  added with default values, so older files keep loading (this is how resist, speed and the battle were added).
+
+### 5.6 Last save, autosave and continue
+`SaveManager.SaveCharacters` writes the save and sets `LastCharacterSave`. The pointer is ignored if the save it names
+does not exist.
+
+```mermaid
+flowchart TD
+    C["a command was executed"] --> H["Cli.AfterCommand"]
+    H --> E{"autosave enabled?"}
+    E -- no --> X["nothing"]
+    E -- yes --> Z{"the game has any data?"}
+    Z -- no --> X
+    Z -- yes --> B["build CharacterSave and the battle data"]
+    B --> F{"fingerprint changed?"}
+    F -- no --> X
+    F -- yes --> R{"first write of this session?"}
+    R -- yes --> P["copy the old 'autosave' to 'autosave-previous'"]
+    R -- no --> W
+    P --> W["save slot 'autosave', set it as the last save"]
+```
+* The autosave is written after every command that changed the game, and when the program ends. It contains
+  characters (also the ones created by the user), items, abilities and the battle in progress.
+* A change is found by comparing a fingerprint of the state (the time is not part of it), so commands that change nothing
+  write nothing. The first time, the autosave that is already on disk counts as "the last saved state".
+* The first write of a session keeps the autosave of the previous session as `autosave-previous`, so a player who
+  declined to continue and began a new game can still return to the old one.
+* `autosave on|off` switches it; `saves` lists all slots.
+
+```mermaid
+sequenceDiagram
+    actor User
+    participant Main as Program
+    participant Game as GameStrategy
+    participant Saves as SaveManager
+    participant Store as JsonRepositoryStorage
+    participant File as saves.json
+    Main->>Saves: LastCharacterSaveName
+    Saves->>Store: Load()
+    Store->>File: read (or saves.json.bak if damaged)
+    File-->>Store: JSON
+    Store-->>Saves: Repository
+    Saves-->>Main: "autosave"
+    Main->>User: Continue from the last save? (y/n)
+    User-->>Main: y
+    Main->>Game: ContinueFromLastSave(false)
+    Game->>Saves: TryLoadCharacters("autosave")
+    Saves-->>Game: CharacterSave (+ Battle)
+    Game->>Game: build GameState and Battle, then replace the session
+    Game-->>User: Game 'autosave' loaded ...
+```
+**Continuing.** At start-up (`--chars`) the program asks whether to continue from the last save; `game continue` does the
+same at any moment. Everything (the state and the battle) is built first and the current game is replaced only
+afterwards, so a damaged save changes nothing.
+
+### 5.7 Buffer of pictures (Theme 1)
+`ImageCache` keeps a picture in a local file, so the server is asked once.
+```mermaid
+flowchart TD
+    A["GetAsync(key, url)"] --> K["safe file name from the key"]
+    K --> F{"file exists?"}
+    F -- yes --> X{"expired?"}
+    X -- no --> HIT["return the file (from cache)"]
+    F -- no --> D
+    X -- yes --> D["download the picture"]
+    D --> OK{"download succeeded and the bytes are PNG, JPEG, GIF or WebP?"}
+    OK -- yes --> W["write a temp file, replace the old one"]
+    W --> NEW["return the new file"]
+    OK -- no --> S{"an old file exists?"}
+    S -- yes --> STALE["return the old file (stale)"]
+    S -- no --> ERR["throw the error"]
+```
+| Question | Decision |
+|---|---|
+| Key and name | The key (for example `albedo-portrait`) becomes a safe file name; the extension is the **real** format found from the first bytes |
+| Validation | Only PNG, JPEG, GIF and WebP are stored; an error page instead of a picture is rejected, so the cache is never poisoned |
+| Freshness | A file expires after 30 days (`maxAge`); an expired file is downloaded again |
+| Offline | If the server does not answer, an expired file is still returned (`Stale`) |
+| Writing | Through a temporary file; a picture of the same key in another format replaces the old file |
+| Limits | A picture larger than 10 MB is refused |
+| Source | `IImageSource`: `HttpImageSource` (real), `OfflineImageSource` (a built-in PNG for `--offline`), a fake in tests |
+| Management | `remote cache` (list, sizes), `remote cache clear`, `remote portrait <id>`, `remote portraits` |
+
+The graphical interface will call `ImageCache.GetAsync(...)` with the `ImageUrl` of a `CharacterCard` and show the local file.
+
+### 5.8 Errors and safety
+* A damaged file, a newer format, a full disk and a network failure are reported to the user with a clear message; the
+  program keeps running.
+* A failure of the autosave is shown as a warning and never stops a command.
+* Nothing secret is stored; the files are in the folder of the current user, with the permissions of that user.
+* Writing is done by one process at a time (the application is single-user).
 
 ## 6. Business logic: character catalog (Theme 1)
 
@@ -409,6 +620,9 @@ the core provides the data and the CLI sets the renderer (`BattleBoardRenderer`,
 | `RemoteCliHandler` | `remote ls\|show\|import`, `sheet` | infrastructure, output |
 | `GameStrategy` | `game roster\|start\|status\|attack\|defend\|heal\|ability\|stop\|results` | transform, output |
 | `SystemStrategy` | `commands` | output |
+| `PersistenceStrategy` | `autosave [on\|off]`, `storage` | persistence |
+| `GameStrategy` | (also) `game continue` | persistence |
+| `RemoteCliHandler` | (also) `remote portrait\|portraits\|cache` | infrastructure |
 
 ### 7.10 Extension points
 * **A new command:** write a method in a strategy and add `Register("name", Method)`.
@@ -706,6 +920,8 @@ The console and the network are replaced by test doubles (`DisplayerMock`, `Inpu
 * `help` describes the commands of its own strategy; `commands` lists all of them.
 * The remote service may be unavailable; `--offline` is the fallback.
 * Planned: a graphical interface, saving of a battle in progress, `export` of a document to a file.
+* There is one autosave slot (plus the slot of the previous session); the text editor has no autosave, its documents are saved with `save`.
+
 
 ## 12. Build and run
 Requirements: .NET 8 SDK.

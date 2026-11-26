@@ -13,6 +13,14 @@ namespace Infra.Data
         void Save(Repository repository);
     }
 
+    /// <summary>
+    /// Keeps the repository in a JSON file.
+    /// <para>
+    /// A save is safe against a crash: the new content is written to a temporary file first, the previous file is
+    /// copied to <c>.bak</c> and only then the temporary file takes its place. If the main file is damaged,
+    /// the backup (the previous version) is read instead.
+    /// </para>
+    /// </summary>
     public class JsonRepositoryStorage : IRepositoryStorage
     {
         private static readonly JsonSerializerOptions Options = new JsonSerializerOptions
@@ -31,6 +39,10 @@ namespace Infra.Data
 
         public string Location => _path;
 
+        private string BackupPath => _path + ".bak";
+
+        private string TempPath => _path + ".tmp";
+
         public Repository Load()
         {
             if (!File.Exists(_path))
@@ -38,19 +50,55 @@ namespace Infra.Data
                 return new Repository();
             }
 
-            string json = File.ReadAllText(_path);
-            if (string.IsNullOrWhiteSpace(json))
+            try
             {
-                return new Repository();
+                return Read(_path);
             }
-
-            return JsonSerializer.Deserialize<Repository>(json, Options) ?? new Repository();
+            catch (JsonException) when (File.Exists(BackupPath))
+            {
+                // The file is damaged: the previous version is better than nothing.
+                return Read(BackupPath);
+            }
         }
 
         public void Save(Repository repository)
         {
             repository.LastModified = DateTime.Now;
-            File.WriteAllText(_path, JsonSerializer.Serialize(repository, Options));
+            repository.Version = RepositoryFormat.CurrentVersion;
+
+            string? directory = Path.GetDirectoryName(_path);
+            if (!string.IsNullOrEmpty(directory))
+            {
+                Directory.CreateDirectory(directory);
+            }
+
+            // 1. Everything is written to a temporary file: a crash here leaves the old file untouched.
+            File.WriteAllText(TempPath, JsonSerializer.Serialize(repository, Options));
+
+            // 2. The previous version is kept as a backup, 3. one move puts the new file in its place.
+            if (File.Exists(_path))
+            {
+                File.Copy(_path, BackupPath, overwrite: true);
+            }
+            File.Move(TempPath, _path, overwrite: true);
+        }
+
+        private static Repository Read(string path)
+        {
+            string json = File.ReadAllText(path);
+            if (string.IsNullOrWhiteSpace(json))
+            {
+                return new Repository();
+            }
+
+            var repository = JsonSerializer.Deserialize<Repository>(json, Options) ?? new Repository();
+            if (repository.Version > RepositoryFormat.CurrentVersion)
+            {
+                throw new InvalidDataException(
+                    $"The file '{path}' was written by a newer version of the program " +
+                    $"(format {repository.Version}, this program reads up to {RepositoryFormat.CurrentVersion}).");
+            }
+            return repository;
         }
     }
 }

@@ -1,4 +1,5 @@
 ﻿using System;
+using System.IO;
 using System.Net.Http;
 using GameSystem.Core.Logging;
 using GameSystem.Core.Models;
@@ -11,7 +12,7 @@ using OOPTextProject.TextSystem;
 
 class Program
 {
-    private const string SaveFileName = "saves.json";
+    private const string LegacySavesFile = "saves.json";
     private const string RemoteApiUrl = "https://genshin.jmp.blue/";
 
     static void Main(string[] args)
@@ -20,7 +21,22 @@ class Program
         IDisplayer displayer = new ConsoleDisplayer();
         IInputReader input = new ConsoleInputReader();
         IPresenter presenter = new Presenter(displayer, input);
-        var saves = new SaveManager(new JsonRepositoryStorage(SaveFileName));
+
+        // ----- where the data live: the data folder of the user, not the folder of the program -----
+        var paths = AppPaths.ForCurrentUser();
+        try
+        {
+            if (paths.MigrateLegacySaves(LegacySavesFile))
+            {
+                presenter.Show($"The old saves file was copied to {paths.SavesFile}.");
+            }
+        }
+        catch (IOException ex)
+        {
+            presenter.Show($"The old saves file could not be copied: {ex.Message}");
+        }
+
+        var saves = new SaveManager(new JsonRepositoryStorage(paths.SavesFile));
 
         // ----- mode selection -----
         var startArgs = new CliArguments(args);
@@ -45,25 +61,36 @@ class Program
 
         // ----- the command line: a facade parametrized with strategies -----
         var cli = new Cli(presenter);
+        AutoSaver? autoSaver = null;
 
         if (mode == "chars")
         {
             bool offline = startArgs.Options.ContainsKey("--offline");
-            IGameDataApi api = offline
-                ? new OfflineGameDataApi()
-                : new GenshinApiClient(CreateHttpClient());
+            HttpClient http = CreateHttpClient();
+
+            IGameDataApi api = offline ? new OfflineGameDataApi() : new GenshinApiClient(http);
+            IImageSource imageSource = offline ? new OfflineImageSource() : new HttpImageSource(http);
+            var images = new ImageCache(paths.ImagesDirectory, imageSource, TimeSpan.FromDays(30));
 
             var session = new GameSession();
             var logger = new DisplayerLogger(displayer);
 
+            var game = new GameStrategy(session, saves, presenter, cli, logger);
+            autoSaver = new AutoSaver(session, saves, () => game.CurrentBattle);
+
             cli.UseStrategy(new CharactersCliHandler(logger, presenter, saves, session));
-            cli.UseStrategy(new RemoteCliHandler(api, new RemoteImporter(new StatGenerator()), session, presenter, new CharacterSheetBuilder()));
-            cli.UseStrategy(new GameStrategy(session, saves, presenter, cli, logger));
+            cli.UseStrategy(new RemoteCliHandler(api, new RemoteImporter(new StatGenerator()), session, presenter, new CharacterSheetBuilder(), images));
+            cli.UseStrategy(game);
+            cli.UseStrategy(new PersistenceStrategy(autoSaver, saves, presenter, images));
+            cli.AfterCommand = () => autoSaver.SaveIfChanged();
 
             presenter.Show("=== Characters CLI Mode Activated ===");
             presenter.Show(offline
                 ? "Remote database: offline sample data"
                 : $"Remote database: {RemoteApiUrl}");
+            presenter.Show($"Data folder: {paths.DataDirectory}");
+
+            OfferToContinue(saves, game, presenter);
         }
         else
         {
@@ -85,6 +112,33 @@ class Program
                 break;
             }
             cli.ExecCommand(line);
+        }
+
+        // The game is saved when the program ends, even if the last command changed nothing visible.
+        try
+        {
+            autoSaver?.SaveIfChanged();
+        }
+        catch (Exception ex)
+        {
+            presenter.Show($"[Warning]: the game could not be saved: {ex.Message}");
+        }
+    }
+
+    /// <summary>At the start: offers to continue from the last save (an autosave counts too).</summary>
+    private static void OfferToContinue(SaveManager saves, GameStrategy game, IPresenter presenter)
+    {
+        try
+        {
+            string? last = saves.LastCharacterSaveName;
+            if (last != null && presenter.Confirm($"The last save is '{last}'. Continue from it? (y/n): "))
+            {
+                game.ContinueFromLastSave(askConfirmation: false);
+            }
+        }
+        catch (Exception ex)
+        {
+            presenter.Show($"The last save could not be loaded: {ex.Message}");
         }
     }
 

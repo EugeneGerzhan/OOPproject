@@ -1,10 +1,11 @@
-﻿using System;
+﻿using GameSystem.Core.Models;
+using GameSystem.Core.Remote;
+using Infra.Data;
+using Infra.WebApi;
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Threading.Tasks;
-using GameSystem.Core.Models;
-using GameSystem.Core.Remote;
-using Infra.WebApi;
 
 namespace OOPproject.SOLID
 {
@@ -22,15 +23,18 @@ namespace OOPproject.SOLID
         private readonly GameSession _session;
         private readonly IPresenter _ui;
         private readonly CharacterSheetBuilder _sheets;
+        private readonly ImageCache? _images;
 
         public RemoteCliHandler(IGameDataApi api, RemoteImporter importer, GameSession session,
-                                IPresenter ui, CharacterSheetBuilder sheets)
+                        IPresenter ui, CharacterSheetBuilder sheets, ImageCache? images = null)
         {
             _api = api;
             _importer = importer;
             _session = session;
             _ui = ui;
             _sheets = sheets;
+            _images = images;
+
             RegisterCommands();
         }
 
@@ -44,6 +48,21 @@ namespace OOPproject.SOLID
         private void HandleRemote(string[] args, Dictionary<string, string> opts)
         {
             const string usage = "Usage: remote <ls|show|import> <char|weapon> [<id>] [--find <text>] [--limit <n>]";
+            if (args.Length > 0)
+            {
+                switch (args[0].ToLowerInvariant())
+                {
+                    case "portrait":
+                        ShowPortrait(string.Join(" ", args.Skip(1)).Trim());
+                        return;
+                    case "portraits":
+                        DownloadPortraits(opts);
+                        return;
+                    case "cache":
+                        HandleCache(args.Skip(1).ToArray());
+                        return;
+                }
+            }
             if (args.Length < 2)
             {
                 _ui.Show(usage);
@@ -239,5 +258,115 @@ namespace OOPproject.SOLID
 
         /// <summary>Console app: no synchronization context, so blocking on a task is safe here.</summary>
         private static T Wait<T>(Task<T> task) => task.GetAwaiter().GetResult();
+        // remote portrait <id>
+        private void ShowPortrait(string id)
+        {
+            if (!RequireImages())
+            {
+                return;
+            }
+            if (id.Length == 0)
+            {
+                _ui.Show("Usage: remote portrait <id>");
+                return;
+            }
+
+            var remote = Wait(_api.GetCharacterAsync(id));
+            CachedImage image = DownloadPortrait(remote);
+
+            string source = image.FromCache
+                ? (image.Stale ? "from the cache (expired, the service did not answer)" : "from the cache")
+                : "downloaded";
+            _ui.Show($"Portrait of {remote.Name}: {image.FilePath} ({image.Size} bytes, {source}).");
+        }
+
+        // remote portraits [--find <text>] [--limit <n>]: puts many portraits into the cache
+        private void DownloadPortraits(Dictionary<string, string> opts)
+        {
+            if (!RequireImages())
+            {
+                return;
+            }
+
+            IReadOnlyList<string> ids = Wait(_api.GetCharacterIdsAsync());
+            if (opts.TryGetValue("--find", out var find) && !string.IsNullOrWhiteSpace(find))
+            {
+                string needle = find.Trim().ToLowerInvariant().Replace(' ', '-');
+                ids = ids.Where(i => i.Contains(needle, StringComparison.OrdinalIgnoreCase)).ToList();
+            }
+
+            int limit = 10;
+            if (opts.TryGetValue("--limit", out var limitText) && !string.IsNullOrWhiteSpace(limitText)
+                && (!int.TryParse(limitText, out limit) || limit < 1))
+            {
+                _ui.Show("--limit must be a positive integer.");
+                return;
+            }
+
+            int downloaded = 0;
+            int cached = 0;
+            var failed = new List<string>();
+
+            foreach (string id in ids.Take(limit))
+            {
+                try
+                {
+                    var image = DownloadPortrait(Wait(_api.GetCharacterAsync(id)));
+                    if (image.FromCache) cached++; else downloaded++;
+                }
+                catch (Exception ex) when (ex is RemoteApiException || ex is InvalidDataException || ex is InvalidOperationException)
+                {
+                    failed.Add(id);
+                }
+            }
+
+            _ui.Show($"Portraits: {downloaded} downloaded, {cached} taken from the cache, {failed.Count} failed (folder: {_images!.Folder}).");
+            if (failed.Count > 0)
+            {
+                _ui.Show("  Failed: " + string.Join(", ", failed));
+            }
+        }
+
+        // remote cache [clear]
+        private void HandleCache(string[] rest)
+        {
+            if (!RequireImages())
+            {
+                return;
+            }
+
+            if (rest.Length > 0 && rest[0].Equals("clear", StringComparison.OrdinalIgnoreCase))
+            {
+                _ui.Show($"Cache cleared: {_images!.Clear()} file(s) removed.");
+                return;
+            }
+
+            var files = _images!.List();
+            _ui.Show($"=== PICTURE CACHE ({files.Count} file(s), {_images.TotalBytes} bytes) ===");
+            _ui.Show($"  Folder: {_images.Folder}");
+            foreach (var file in files)
+            {
+                _ui.Show($"  {file.Key} ({file.Size} bytes, {file.SavedAtUtc.ToLocalTime():yyyy-MM-dd HH:mm})");
+            }
+        }
+
+        private CachedImage DownloadPortrait(RemoteCharacter remote)
+        {
+            if (string.IsNullOrWhiteSpace(remote.ImageUrl))
+            {
+                throw new InvalidOperationException($"{remote.Name} has no link to a picture.");
+            }
+            return Wait(_images!.GetAsync($"{remote.Id}-portrait", remote.ImageUrl));
+        }
+
+        private bool RequireImages()
+        {
+            if (_images != null)
+            {
+                return true;
+            }
+            _ui.Show("The picture cache is not configured.");
+            return false;
+        }
     }
 }

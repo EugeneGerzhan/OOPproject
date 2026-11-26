@@ -31,7 +31,11 @@ public class Cli : IRenderableDisplay
 
     /// <summary>The strategies in the order they were plugged in.</summary>
     public IReadOnlyList<ICommandStrategy> Strategies => _strategies;
-
+    /// <summary>
+    /// Called after every command that was found and run (also when the command failed).
+    /// The application uses it for the autosave. A failure of the hook is reported and never breaks the command line.
+    /// </summary>
+    public Action? AfterCommand { get; set; }
     /// <summary>
     /// Plugs a strategy in: its commands become available. If another strategy already has a command with the
     /// same selector, the one plugged in later wins.
@@ -75,6 +79,19 @@ public class Cli : IRenderableDisplay
         catch (Exception ex)
         {
             _presenter.Show($"[Error executing command]: {ex.Message}");
+        }
+        RunAfterCommand();
+    }
+
+    private void RunAfterCommand()
+    {
+        try
+        {
+            AfterCommand?.Invoke();
+        }
+        catch (Exception ex)
+        {
+            _presenter.Show($"[Warning]: the automatic step after the command failed: {ex.Message}");
         }
     }
 

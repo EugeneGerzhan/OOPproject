@@ -30,7 +30,27 @@ namespace Infra.Data
         {
             var repository = _storage.Load();
             Put(repository.CharacterSaves, save);
+            repository.LastCharacterSave = save.SaveName;
             _storage.Save(repository);
+        }
+       
+        /// <summary>
+        /// The name of the character save that was written last (an autosave counts too);
+        /// null when there is none or when that save does not exist any more.
+        /// </summary>
+        public string? LastCharacterSaveName
+        {
+            get
+            {
+                var repository = _storage.Load();
+                string? name = repository.LastCharacterSave;
+                if (name == null)
+                {
+                    return null;
+                }
+                return repository.CharacterSaves.Keys.FirstOrDefault(
+                    key => string.Equals(key, name, StringComparison.OrdinalIgnoreCase));
+            }
         }
 
         public bool TryLoadText(string name, [NotNullWhen(true)] out TextSave? save)
