@@ -1,0 +1,15 @@
+<Window x:Class="OOPproject.Gui.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:local="clr-namespace:OOPproject.Gui"
+        Title="Character Battler" Height="720" Width="1120" MinHeight="480" MinWidth="820"
+        WindowStartupLocation="CenterScreen">
+    <TabControl x:Name="Tabs" Margin="4">
+        <TabItem x:Name="CatalogItem" Header="Catalog">
+            <local:CatalogView x:Name="CatalogTab" />
+        </TabItem>
+        <TabItem x:Name="GameItem" Header="Game">
+            <local:GameView x:Name="GameTab" />
+        </TabItem>
+    </TabControl>
+</Window>

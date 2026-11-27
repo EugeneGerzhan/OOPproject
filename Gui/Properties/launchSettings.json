@@ -1,0 +1,8 @@
+{
+  "profiles": {
+    "Gui": {
+      "commandName": "Project",
+      "commandLineArgs": "--offline"
+    }
+  }
+}

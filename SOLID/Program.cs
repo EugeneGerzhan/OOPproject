@@ -70,7 +70,9 @@ class Program
 
             IGameDataApi api = offline ? new OfflineGameDataApi() : new GenshinApiClient(http);
             IImageSource imageSource = offline ? new OfflineImageSource() : new HttpImageSource(http);
-            var images = new ImageCache(paths.ImagesDirectory, imageSource, TimeSpan.FromDays(30));
+            // the offline mode has its own folder: its built-in one-pixel pictures must never be taken for real portraits
+            string imagesFolder = offline ? Path.Combine(paths.DataDirectory, "images-offline") : paths.ImagesDirectory;
+            var images = new ImageCache(imagesFolder, imageSource, TimeSpan.FromDays(30));
 
             var session = new GameSession();
             var logger = new DisplayerLogger(displayer);

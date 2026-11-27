@@ -56,6 +56,7 @@ Out of scope for this version: a graphical interface, network play, saving of a 
 | Save user data | `save <name>`, `load <name>`, `saves` (characters, items, abilities and their links) |
 | Extra | `remote import char <id>` and `remote import weapon <id>` bring remote data into the game; `add item` equips; `sheet <character>` prints a character sheet |
 | Download portraits into local files | `remote portrait <id>`, `remote portraits [--find <text>] [--limit <n>]` fill the picture cache; `remote cache [clear]` shows or empties it |
+| Cards of characters with portraits | `CatalogView`: a scrollable list of cards (portrait, name, stars, facts, short description), search and filters, details panel |
 
 **Theme 2: text game**
 | Requirement | Implementation |
@@ -69,6 +70,8 @@ Out of scope for this version: a graphical interface, network play, saving of a 
 | Load new characters | `remote import char <id>`, `create char`, `game load <name>` |
 | Continue from the last save | `game continue`, and the program offers to continue from the last save at start-up; the game is also saved automatically (`autosave [on\|off]`) |
 | Created characters survive a restart | They are part of every save and of the autosave |
+| The window as a console, buttons for saves | `GameView`: output field for the text of the game, input field, buttons Load, Continue, Save as, Refresh |
+
 
 
 **Theme 3: structured text editor**
@@ -322,11 +325,13 @@ The files are kept in a folder of the application in the data folder of the user
 | Linux / macOS | `~/.local/share/CharacterBattler` |
 | Any | the folder named by the variable `CHARACTER_BATTLER_DATA` (portable use, tests) |
 
+
 ```
 CharacterBattler/
   saves.json        the repository
   saves.json.bak    the previous version of it
   images/           albedo-portrait.png ...
+  images-offline/   the pictures of the --offline mode (kept apart from the real portraits)
 ```
 The command `storage` prints the real paths. Older versions wrote `saves.json` next to the program; at the first start
 such a file is copied to the new location (`AppPaths.MigrateLegacySaves`), nothing is overwritten.
@@ -914,7 +919,178 @@ parser, the strategies, the renderers, the game and text commands, the JSON stor
 The console and the network are replaced by test doubles (`DisplayerMock`, `InputReaderStub`,
 `StubHttpMessageHandler`, `FakeGameDataApi`, `InMemoryStorage`). Run them with `dotnet test`.
 
-## 11. Limitations and future work
+## 11. Graphical user interface
+
+### 11.1 Technology
+| Option | Decision |
+|---|---|
+| WPF (.NET) | **Chosen.** Native Windows framework (it is built on the Windows graphics system), designed in Visual Studio, uses XAML for the layout and C# for the logic, so the whole project stays in one language |
+| .NET MAUI | Not used: heavier, aimed at mobile devices, and the project needs only a desktop window |
+| Web (TypeScript + Web API) | Not used: it would need a second application (a server with an API) next to the core |
+
+The graphical interface is another **presentation layer** next to the CLI. Both use the same core and the same data
+layer; nothing of the business logic was copied or changed.
+```mermaid
+flowchart LR
+    subgraph P["Presentation layer"]
+        CLI["CLI<br/>(console, Program.cs)"]
+        GUI["GUI<br/>(WPF window)"]
+    end
+    subgraph B["Business logic layer"]
+        CORE["Core and Engine<br/>Battle, Character,<br/>CharacterCatalog"]
+    end
+    subgraph D["Persistence layer"]
+        DATA["Infra.Data<br/>saves.json, ImageCache"]
+    end
+    CLI --> CORE
+    GUI --> CORE
+    CORE --> DATA
+```
+
+### 11.2 Structure of the window
+The interface is a tree of containers (the Composite structure of the lecture): a window holds a tab control, tabs hold
+views, views hold panels and elements. Every card of the list is itself a small tree.
+```mermaid
+flowchart TD
+    W["MainWindow"] --> T["TabControl"]
+    T --> C["CatalogView"]
+    T --> G["GameView"]
+    C --> CF["Filters: search, vision, weapon, rarity, sort"]
+    C --> CL["ListBox (scrollable)"]
+    C --> CD["Details panel"]
+    CL --> CARD["Card (one per character)"]
+    CARD --> CP["Portrait"]
+    CARD --> CN["Name and stars"]
+    CARD --> CI["Title, facts, short text"]
+    CD --> CB["Button: Add to the game"]
+    G --> GS["Saves: list and buttons Load, Continue, Save as, Refresh"]
+    G --> GO["Output field (the console)"]
+    G --> GI["Input field and Send"]
+```
+Elements that are used: a text label (`TextBlock`), a text box (`TextBox`), a button (`Button`), a picture (`ImageBrush` of
+the portrait), lists (`ListBox`, `ComboBox`), a splitter and a progress bar. The layout is made in XAML; the behaviour is
+written as **event handlers** (the event-driven model): a click, a change of the text or of the selection calls a method.
+The cards use data binding to `CardViewModel` (the first step towards MVVM, which is the topic of the next part).
+
+### 11.3 Theme 1: the catalog
+* **Cards.** The list is a `ListBox` with a template: a portrait, the name with stars, the title, a line of facts
+  (vision, weapon, nation) and a short description. The accent colour of the card depends on the vision.
+* **Portraits.** The picture is requested by the card when it appears on the screen (the list is virtualized, so
+  only visible cards load). The request goes through `ImageCache`: the first time the picture is downloaded and
+  written to a file, later it is read from the file (see 5.7), so the server is asked once. Until the picture is there
+  (or if there is none) a placeholder with the first letter is shown; a failed picture never breaks the list.
+* **Search.** Text, vision, weapon, minimal rarity and sorting use `CharacterCatalog.Search`; the window only builds a
+  `CatalogFilter`.
+* **Details.** The chosen card shows a large portrait (and where it came from), the description, the talents and the
+  passive talents. The button *Add to the game* only raises an event; the main window runs `remote import char <id>` in
+  the game tab, so the views do not know each other.
+* **Offline.** With the argument `--offline` the sample data of `OfflineGameDataApi` are used and the pictures are
+  placeholders. Offline pictures are kept in their own folder so they never mix with real ones.
+
+### 11.4 Theme 2: the window as a console
+The window is the console of the text game. No command was rewritten: the same `Cli` with the same strategies runs
+the commands, and only the two channels of the command handlers are replaced (this is the result of the Dependency
+Inversion done in the SOLID step):
+| Console | Window |
+|---|---|
+| `ConsoleDisplayer` (output) | `NotifyingDisplayer` raises an event for every text; the view appends it to the output field |
+| `ConsoleInputReader` (input) | `DialogInputReader` turns a question of a command into a dialog (a message box for y/n, a small window for other answers; *Cancel* stops the command) |
+
+```mermaid
+classDiagram
+    direction LR
+    class IDisplayer {
+        <<interface>>
+    }
+    class IInputReader {
+        <<interface>>
+    }
+    class NotifyingDisplayer {
+        +TextWritten
+        +PendingPrompt
+    }
+    class DialogInputReader
+    class CommandRunner {
+        +RunAsync(string)
+        +RunAsync(Action)
+    }
+    class Cli
+    class AppServices {
+        +Create(args)$
+        +Cli
+        +Runner
+        +Catalog
+        +Images
+    }
+    class CatalogView
+    class GameView
+    class CardViewModel {
+        +Portrait
+        +PortraitInfo
+    }
+    class CardPresentation {
+        +From(CharacterCard)$
+    }
+    class CharacterCatalog
+    class ImageCache
+    IDisplayer <|.. NotifyingDisplayer
+    IInputReader <|.. DialogInputReader
+    DialogInputReader --> NotifyingDisplayer : reads the prompt
+    CommandRunner --> Cli
+    AppServices o-- Cli
+    AppServices o-- CommandRunner
+    AppServices o-- CharacterCatalog
+    AppServices o-- ImageCache
+    GameView --> AppServices
+    CatalogView --> AppServices
+    GameView ..> NotifyingDisplayer : subscribes
+    CatalogView o-- "*" CardViewModel
+    CardViewModel --> CardPresentation
+    CardViewModel --> ImageCache
+```
+* **Input and output.** The input field with the command history (arrow keys), the output field with scrolling and
+  the buttons *roster*, *status*, *history*, *results*, *storage*, *help* (each one runs a command).
+* **Saves.** The list shows the saves (name, time) of the characters and of the battle. *Load* (or a double click)
+  runs `game load`, *Continue* runs `game continue`, *Save as...* asks for a name and runs `game save`. At the start of
+  the program the window offers to continue from the last save. The autosave of 5.6 works as in the console and is
+  written when the window is closed.
+* **Threads.** Commands can wait for the network, so they run on a worker thread (`CommandRunner`), one after another,
+  and the window does not freeze. The text and the dialogs are passed to the UI thread with the dispatcher, in the order
+  they were printed.
+```mermaid
+sequenceDiagram
+    actor User
+    participant View as GameView (UI thread)
+    participant Run as CommandRunner (worker thread)
+    participant Cli as Cli and strategies
+    participant Disp as NotifyingDisplayer
+    participant In as DialogInputReader
+    User->>View: types a command, presses Enter
+    View->>Run: RunAsync(line)
+    Run->>Cli: ExecCommand(line)
+    Cli->>Disp: Display(text)
+    Disp-->>View: TextWritten(text)
+    View->>View: Dispatcher.Invoke, append to the output
+    Cli->>In: ReadLine() (for example y/n)
+    In->>View: Dispatcher.Invoke, show a dialog
+    View-->>In: the answer
+    Cli-->>Run: done (AfterCommand: autosave)
+    Run-->>View: the task is finished
+    View->>View: enable the input, refresh the list of saves
+```
+
+### 11.5 Composition and testing
+`AppServices.Create` is the composition root of the window (the counterpart of `Program.cs`): it creates the data
+paths, the saves, the image cache, the strategies and the autosave. The logic that does not need a window was kept out of
+the WPF project and is covered by tests: `NotifyingDisplayer`, `PromptText` (what kind of question it is),
+`CommandRunner` (one at a time, errors do not block the queue) and `CardPresentation` (texts, stars, colours).
+
+### 11.6 Limitations
+The interface runs on Windows only. WPF cannot show WebP pictures without the Windows WebP codec; such a picture is
+replaced by the placeholder. Controls are bound by event handlers and light view models; a full MVVM structure is the
+next step.
+
+## 12. Limitations and future work
 * Status effects (buffs, debuffs) are not implemented; the saved battle continues exactly, but only one battle can be saved per save slot.
 * There is no redo, and `undo` is available only in the text mode.
 * `help` describes the commands of its own strategy; `commands` lists all of them.
@@ -923,7 +1099,7 @@ The console and the network are replaced by test doubles (`DisplayerMock`, `Inpu
 * There is one autosave slot (plus the slot of the previous session); the text editor has no autosave, its documents are saved with `save`.
 
 
-## 12. Build and run
+## 13. Build and run
 Requirements: .NET 8 SDK.
 ```
 dotnet build
